@@ -443,11 +443,13 @@ def render(api_url, headers):
 
     # ── TAB 4: Chat ─────────────────────────────────────────────────────
     with tab_chat:
-        col_r, _, col_clear = st.columns([1, 3, 1])
+        col_r, col_tts, col_clear = st.columns([1, 2, 1])
         with col_r:
             if st.button("Refresh", key="refresh_chat"):
                 st.session_state.pop("chat_history", None)
                 st.rerun()
+        with col_tts:
+            speak_replies = st.toggle("Speak Replies", key="tts_toggle")
         with col_clear:
             if st.button("Clear Chat", key="clear_chat"):
                 requests.delete(f"{api_url}/api/chat/history", headers=headers)
@@ -469,23 +471,30 @@ def render(api_url, headers):
             else:
                 st.chat_message("assistant").write(msg["text"])
 
-        # Voice mode with Web Speech API
-        from streamlit_app.components.voice_chat import render_voice_chat
-        voice_on = render_voice_chat(api_url, headers, history_key="chat_history", chat_key="patient")
+        # Mic button for voice input
+        from streamlit_app.components.voice_chat import voice_input_widget
+        voice_input_widget()
 
-        if not voice_on:
-            # Text input mode
-            chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
-            if chat_msg:
-                st.chat_message("user").write(chat_msg)
-                st.session_state.chat_history.append({"role": "user", "text": chat_msg})
-                with st.chat_message("assistant"):
-                    with st.spinner(""):
-                        cr = requests.post(f"{api_url}/api/chat/message",
-                                           json={"message": chat_msg}, headers=headers)
-                        if cr.status_code == 200:
-                            reply = cr.json()["response"]
-                        else:
-                            reply = "Something went wrong. Please try again."
-                    st.write(reply)
-                st.session_state.chat_history.append({"role": "assistant", "text": reply})
+        # Text input (also receives voice transcript)
+        chat_msg = st.chat_input("Type or speak your message...", key="pat_chat_input")
+        if chat_msg:
+            st.chat_message("user").write(chat_msg)
+            st.session_state.chat_history.append({"role": "user", "text": chat_msg})
+            with st.chat_message("assistant"):
+                with st.spinner(""):
+                    cr = requests.post(f"{api_url}/api/chat/message",
+                                       json={"message": chat_msg}, headers=headers)
+                    if cr.status_code == 200:
+                        reply = cr.json()["response"]
+                    else:
+                        reply = "Something went wrong. Please try again."
+                st.write(reply)
+
+                # TTS playback if enabled
+                if speak_replies:
+                    tts = requests.post(f"{api_url}/api/chat/speak",
+                                        json={"message": reply}, headers=headers)
+                    if tts.status_code == 200:
+                        st.audio(tts.content, format="audio/mp3", autoplay=True)
+
+            st.session_state.chat_history.append({"role": "assistant", "text": reply})
