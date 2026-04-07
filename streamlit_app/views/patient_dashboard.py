@@ -478,33 +478,48 @@ def render(api_url, headers):
         # Voice mode
         if speak_replies:
             from streamlit_app.components.voice_chat import voice_input
-            voice_result = voice_input(auto_start=True, resume=True, key="pat_voice")
 
-            # Process voice transcript
-            if voice_result and isinstance(voice_result, dict) and voice_result.get("transcript"):
-                vts = voice_result.get("ts", 0)
-                if vts != st.session_state.get("_last_voice_ts"):
-                    st.session_state._last_voice_ts = vts
-                    voice_text = voice_result["transcript"].strip()
-                    if voice_text:
-                        st.session_state.chat_history.append({"role": "user", "text": voice_text})
+            # If processing a voice message, pause the mic
+            is_processing = st.session_state.get("_voice_processing", False)
+
+            if not is_processing:
+                voice_result = voice_input(auto_start=True, resume=True, key="pat_voice")
+
+                if voice_result and isinstance(voice_result, dict) and voice_result.get("transcript"):
+                    vts = voice_result.get("ts", 0)
+                    if vts != st.session_state.get("_last_voice_ts"):
+                        st.session_state._last_voice_ts = vts
+                        st.session_state._voice_processing = True
+                        st.session_state._pending_voice = voice_result["transcript"].strip()
+                        st.rerun()
+            else:
+                # Mic is paused — show processing state
+                st.caption("Processing your voice message...")
+                voice_text = st.session_state.pop("_pending_voice", "")
+                if voice_text:
+                    st.session_state.chat_history.append({"role": "user", "text": voice_text})
+
+                    with st.spinner("Thinking..."):
                         cr = requests.post(f"{api_url}/api/chat/message",
                                            json={"message": voice_text}, headers=headers)
                         if cr.status_code == 200:
                             reply = cr.json()["response"]
                         else:
                             reply = "Something went wrong."
-                        st.session_state.chat_history.append({"role": "assistant", "text": reply})
 
-                        # Generate TTS for response
-                        import re
-                        clean = re.sub(r'[*#_`\[\]()]', '', reply)
-                        if clean.strip():
-                            tts = requests.post(f"{api_url}/api/chat/speak",
-                                                json={"message": clean[:4000]}, headers=headers)
-                            if tts.status_code == 200:
-                                st.session_state["_tts_audio"] = tts.content
-                        st.rerun()
+                    st.session_state.chat_history.append({"role": "assistant", "text": reply})
+
+                    # Generate TTS
+                    import re
+                    clean = re.sub(r'[*#_`\[\]()]', '', reply)
+                    if clean.strip():
+                        tts = requests.post(f"{api_url}/api/chat/speak",
+                                            json={"message": clean[:4000]}, headers=headers)
+                        if tts.status_code == 200:
+                            st.session_state["_tts_audio"] = tts.content
+
+                st.session_state._voice_processing = False
+                st.rerun()
 
         # Text input (always available)
         chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
