@@ -471,12 +471,43 @@ def render(api_url, headers):
             else:
                 st.chat_message("assistant").write(msg["text"])
 
-        # Mic button for voice input
-        from streamlit_app.components.voice_chat import voice_input_widget
-        voice_input_widget()
+        # Play TTS if queued from previous run
+        if "_tts_audio" in st.session_state:
+            st.audio(st.session_state.pop("_tts_audio"), format="audio/mp3", autoplay=True)
 
-        # Text input (also receives voice transcript)
-        chat_msg = st.chat_input("Type or speak your message...", key="pat_chat_input")
+        # Voice mode
+        if speak_replies:
+            from streamlit_app.components.voice_chat import voice_input
+            voice_result = voice_input(auto_start=True, resume=True, key="pat_voice")
+
+            # Process voice transcript
+            if voice_result and isinstance(voice_result, dict) and voice_result.get("transcript"):
+                vts = voice_result.get("ts", 0)
+                if vts != st.session_state.get("_last_voice_ts"):
+                    st.session_state._last_voice_ts = vts
+                    voice_text = voice_result["transcript"].strip()
+                    if voice_text:
+                        st.session_state.chat_history.append({"role": "user", "text": voice_text})
+                        cr = requests.post(f"{api_url}/api/chat/message",
+                                           json={"message": voice_text}, headers=headers)
+                        if cr.status_code == 200:
+                            reply = cr.json()["response"]
+                        else:
+                            reply = "Something went wrong."
+                        st.session_state.chat_history.append({"role": "assistant", "text": reply})
+
+                        # Generate TTS for response
+                        import re
+                        clean = re.sub(r'[*#_`\[\]()]', '', reply)
+                        if clean.strip():
+                            tts = requests.post(f"{api_url}/api/chat/speak",
+                                                json={"message": clean[:4000]}, headers=headers)
+                            if tts.status_code == 200:
+                                st.session_state["_tts_audio"] = tts.content
+                        st.rerun()
+
+        # Text input (always available)
+        chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
         if chat_msg:
             st.chat_message("user").write(chat_msg)
             st.session_state.chat_history.append({"role": "user", "text": chat_msg})
@@ -490,10 +521,11 @@ def render(api_url, headers):
                         reply = "Something went wrong. Please try again."
                 st.write(reply)
 
-                # TTS playback if enabled
                 if speak_replies:
+                    import re
+                    clean = re.sub(r'[*#_`\[\]()]', '', reply)
                     tts = requests.post(f"{api_url}/api/chat/speak",
-                                        json={"message": reply}, headers=headers)
+                                        json={"message": clean[:4000]}, headers=headers)
                     if tts.status_code == 200:
                         st.audio(tts.content, format="audio/mp3", autoplay=True)
 
