@@ -1,0 +1,36 @@
+# Web framework
+fastapi==0.115.0
+uvicorn==0.30.6
+
+# Database
+sqlalchemy==2.0.35
+asyncpg==0.29.0
+greenlet==3.1.0
+
+# Auth
+pyjwt==2.9.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+
+# LangGraph / LangChain
+langgraph==0.2.53
+langchain==0.3.7
+langchain-openai==0.2.8
+langchain-core==0.3.19
+
+# Streamlit frontend
+streamlit==1.39.0
+requests==2.32.3
+
+# Data Science & Analytics (Section 7)
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# Testing (Section 6)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0
+
+# Utils
+python-multipart==0.0.12

@@ -1,0 +1,27 @@
+HMS 3 — Sample Login Credentials
+==================================
+All passwords: password123
+
+ADMIN
+  admin@hms.com
+
+DOCTORS
+  dr.sharma@hms.com    (General Medicine)
+  dr.patel@hms.com     (Cardiology)
+  dr.khan@hms.com      (Pediatrics)
+
+NURSE
+  nurse.priya@hms.com
+
+STAFF
+  staff.ravi@hms.com
+
+PATIENTS
+  amit@example.com      (HMS-2026-00001)
+  sneha@example.com     (HMS-2026-00002)
+  rahul@example.com     (HMS-2026-00003)
+  priyar@example.com    (HMS-2026-00004)
+  arjun@example.com     (HMS-2026-00005)
+  meera@example.com     (HMS-2026-00006)
+  vikram@example.com    (HMS-2026-00007)
+  ananya@example.com    (HMS-2026-00008)
