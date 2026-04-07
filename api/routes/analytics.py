@@ -13,6 +13,28 @@ from analytics.reports import (
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 
+# ─── RAG Feedback ─────────────────────────────────────────────────────────
+
+@router.get("/feedback-rag")
+async def rag_feedback_query(
+    query: str = Query(..., description="Question about patient feedback"),
+    doctor_name: str = Query("", description="Filter by doctor name"),
+    user: dict = Depends(get_current_user)
+):
+    """RAG-powered feedback search. Ask questions about patient feedback."""
+    from services.rag_feedback import generate_rag_response
+    response = generate_rag_response(query, doctor_name)
+    return {"query": query, "response": response}
+
+
+@router.post("/feedback-sync")
+async def sync_feedback(user: dict = Depends(get_current_user)):
+    """Sync all feedback from PostgreSQL to ChromaDB vector store."""
+    from services.rag_feedback import sync_feedback_to_vectorstore
+    count = await sync_feedback_to_vectorstore()
+    return {"message": f"Synced {count} feedback entries to vector store."}
+
+
 @router.get("/report")
 async def get_full_report(
     days: int = Query(90, description="Number of days to analyze"),

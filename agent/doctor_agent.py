@@ -10,6 +10,7 @@ from tools.session_tools import create_session, activate_session, complete_sessi
 from tools.appointment_tools import cancel_appointment, reschedule_appointment, book_appointment, check_earliest_slot
 from tools.patient_tools import search_patients
 from tools.report_tools import generate_session_report
+from tools.rag_tools import query_feedback_rag
 
 
 class DoctorState(TypedDict):
@@ -17,7 +18,7 @@ class DoctorState(TypedDict):
     user_info: str
 
 
-doctor_tools = [get_queue, call_next, call_patient, complete_appointment, cancel_appointment, reschedule_appointment, book_appointment, check_earliest_slot, emergency_book, search_patients, get_my_patients, get_my_sessions, set_priority, create_session, activate_session, complete_session, extend_session, cancel_session, generate_session_report]
+doctor_tools = [get_queue, call_next, call_patient, complete_appointment, cancel_appointment, reschedule_appointment, book_appointment, check_earliest_slot, emergency_book, search_patients, get_my_patients, get_my_sessions, set_priority, create_session, activate_session, complete_session, extend_session, cancel_session, generate_session_report, query_feedback_rag]
 
 llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
 llm_with_tools = llm.bind_tools(doctor_tools)

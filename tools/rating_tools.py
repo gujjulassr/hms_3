@@ -39,6 +39,20 @@ async def submit_rating(patient_uhid: str, doctor_name: str, rating: int, feedba
         db.add(new_rating)
         await db.commit()
 
+    # Auto-sync to RAG vector store
+    try:
+        from services.rag_feedback import add_feedback_to_store
+        add_feedback_to_store(
+            feedback_id=str(new_rating.id),
+            patient_name=patient.uhid,
+            doctor_name=doc_user.full_name,
+            specialization=doctor.specialization or "",
+            rating=rating,
+            feedback_text=feedback
+        )
+    except Exception as e:
+        print(f"[RAG] Sync failed: {e}")
+
     return f"Rating submitted: {rating}/5 for Dr. {doc_user.full_name}. Thank you!"
 
 

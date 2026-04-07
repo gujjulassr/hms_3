@@ -15,6 +15,7 @@ from tools.session_tools import check_availability, create_session, activate_ses
 from tools.appointment_tools import book_appointment, get_my_appointments, cancel_appointment, reschedule_appointment, check_earliest_slot                                                        
 from tools.rating_tools import submit_rating, get_doctor_ratings, search_feedback                                                                                         
 from tools.report_tools import generate_patient_report, generate_session_report
+from tools.rag_tools import query_feedback_rag, sync_feedback_store
 from tools.queue_tools import checkin_patient, get_queue, call_next, call_patient, complete_appointment, emergency_book, set_priority, get_audit_log, get_my_patients,get_my_sessions  
 
 
@@ -28,7 +29,7 @@ class StaffState(TypedDict):
 staff_tools = [checkin_patient, get_queue, call_next, call_patient, complete_appointment, emergency_book, set_priority, get_audit_log, get_my_patients, get_my_sessions,  
   search_patients, get_patient_details, register_patient, update_patient, add_beneficiary, get_my_beneficiaries, search_doctors, check_availability, check_earliest_slot,   
   book_appointment, get_my_appointments, cancel_appointment, reschedule_appointment, create_session, activate_session, complete_session, extend_session, cancel_session, submit_rating,
-  get_doctor_ratings, search_feedback, generate_patient_report, generate_session_report]
+  get_doctor_ratings, search_feedback, generate_patient_report, generate_session_report, query_feedback_rag, sync_feedback_store]
 
 
 llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
