@@ -416,44 +416,87 @@ def render_patients(api_url, headers):
 
 
 def render_chat(api_url, headers):
-    col_r, _, col_clear = st.columns([1, 3, 1])
+    history_key = "doc_chat_history"
+    col_r, col_tts, col_clear = st.columns([1, 2, 1])
     with col_r:
         if st.button("Refresh", key="refresh_doc_chat"):
-            st.session_state.pop("doc_chat_history", None)
+            st.session_state.pop(history_key, None)
             st.rerun()
+    with col_tts:
+        speak_replies = st.toggle("Speak Replies", key="doc_tts_toggle")
     with col_clear:
         if st.button("Clear Chat", key="clear_doc_chat"):
             requests.delete(f"{api_url}/api/chat/history", headers=headers)
-            st.session_state.doc_chat_history = []
+            st.session_state[history_key] = []
             st.rerun()
 
-    # Load from MongoDB on first load
-    if "doc_chat_history" not in st.session_state:
+    if history_key not in st.session_state:
         hr = requests.get(f"{api_url}/api/chat/history", headers=headers)
         if hr.status_code == 200:
-            st.session_state.doc_chat_history = hr.json()["messages"]
+            st.session_state[history_key] = hr.json()["messages"]
         else:
-            st.session_state.doc_chat_history = []
+            st.session_state[history_key] = []
 
-    # Show all previous messages
-    for msg in st.session_state.doc_chat_history:
+    for msg in st.session_state[history_key]:
         if msg["role"] == "user":
             st.chat_message("user").write(msg["text"])
         else:
             st.chat_message("assistant").write(msg["text"])
 
-    # Chat input — shows message immediately, then spinner for response
+    # TTS playback
+    if "_doc_tts_audio" in st.session_state:
+        st.audio(st.session_state.pop("_doc_tts_audio"), format="audio/mp3", autoplay=True)
+
+    # Voice mode
+    if speak_replies:
+        from streamlit_app.components.voice_chat import voice_input
+        is_processing = st.session_state.get("_doc_voice_processing", False)
+
+        if not is_processing:
+            voice_result = voice_input(auto_start=True, resume=True, key="doc_voice")
+            if voice_result and isinstance(voice_result, dict) and voice_result.get("transcript"):
+                vts = voice_result.get("ts", 0)
+                if vts != st.session_state.get("_doc_last_voice_ts"):
+                    st.session_state._doc_last_voice_ts = vts
+                    st.session_state._doc_voice_processing = True
+                    st.session_state._doc_pending_voice = voice_result["transcript"].strip()
+                    st.rerun()
+        else:
+            st.caption("Processing your voice message...")
+            voice_text = st.session_state.pop("_doc_pending_voice", "")
+            if voice_text:
+                st.session_state[history_key].append({"role": "user", "text": voice_text})
+                with st.spinner("Thinking..."):
+                    cr = requests.post(f"{api_url}/api/chat/message",
+                                       json={"message": voice_text}, headers=headers)
+                    reply = cr.json()["response"] if cr.status_code == 200 else "Something went wrong."
+                st.session_state[history_key].append({"role": "assistant", "text": reply})
+                import re
+                clean = re.sub(r'[*#_`\[\]()]', '', reply)
+                if clean.strip():
+                    tts = requests.post(f"{api_url}/api/chat/speak",
+                                        json={"message": clean[:4000]}, headers=headers)
+                    if tts.status_code == 200:
+                        st.session_state["_doc_tts_audio"] = tts.content
+            st.session_state._doc_voice_processing = False
+            st.rerun()
+
+    # Text input
     chat_msg = st.chat_input("Type your message...", key="doc_chat_input")
     if chat_msg:
         st.chat_message("user").write(chat_msg)
-        st.session_state.doc_chat_history.append({"role": "user", "text": chat_msg})
+        st.session_state[history_key].append({"role": "user", "text": chat_msg})
         with st.chat_message("assistant"):
             with st.spinner(""):
                 cr = requests.post(f"{api_url}/api/chat/message",
                                    json={"message": chat_msg}, headers=headers)
-                if cr.status_code == 200:
-                    reply = cr.json()["response"]
-                else:
-                    reply = "Something went wrong. Please try again."
+                reply = cr.json()["response"] if cr.status_code == 200 else "Something went wrong."
             st.write(reply)
-        st.session_state.doc_chat_history.append({"role": "assistant", "text": reply})
+            if speak_replies:
+                import re
+                clean = re.sub(r'[*#_`\[\]()]', '', reply)
+                tts = requests.post(f"{api_url}/api/chat/speak",
+                                    json={"message": clean[:4000]}, headers=headers)
+                if tts.status_code == 200:
+                    st.audio(tts.content, format="audio/mp3", autoplay=True)
+        st.session_state[history_key].append({"role": "assistant", "text": reply})
