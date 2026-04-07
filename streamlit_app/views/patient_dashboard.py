@@ -443,11 +443,13 @@ def render(api_url, headers):
 
     # ── TAB 4: Chat ─────────────────────────────────────────────────────
     with tab_chat:
-        col_r, _, col_clear = st.columns([1, 3, 1])
+        col_r, col_mode, col_clear = st.columns([1, 2, 1])
         with col_r:
             if st.button("Refresh", key="refresh_chat"):
                 st.session_state.pop("chat_history", None)
                 st.rerun()
+        with col_mode:
+            voice_mode = st.toggle("Voice Mode", key="voice_mode")
         with col_clear:
             if st.button("Clear Chat", key="clear_chat"):
                 requests.delete(f"{api_url}/api/chat/history", headers=headers)
@@ -469,18 +471,61 @@ def render(api_url, headers):
             else:
                 st.chat_message("assistant").write(msg["text"])
 
-        # Chat input — shows message immediately, then spinner for response
-        chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
-        if chat_msg:
-            st.chat_message("user").write(chat_msg)
-            st.session_state.chat_history.append({"role": "user", "text": chat_msg})
-            with st.chat_message("assistant"):
-                with st.spinner(""):
-                    cr = requests.post(f"{api_url}/api/chat/message",
-                                       json={"message": chat_msg}, headers=headers)
-                    if cr.status_code == 200:
-                        reply = cr.json()["response"]
-                    else:
-                        reply = "Something went wrong. Please try again."
-                st.write(reply)
-            st.session_state.chat_history.append({"role": "assistant", "text": reply})
+        if voice_mode:
+            # Voice input mode
+            st.caption("Click to record your voice message")
+            try:
+                from streamlit_audiorecorder import audiorecorder
+                audio_data = audiorecorder("Click to record", "Recording...", key="pat_voice")
+                if len(audio_data) > 0:
+                    # Show audio player
+                    st.audio(audio_data.export().read(), format="audio/wav")
+
+                    if st.button("Send Voice", key="send_voice", use_container_width=True):
+                        with st.spinner("Processing voice..."):
+                            audio_bytes = audio_data.export().read()
+                            files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
+                            vr = requests.post(f"{api_url}/api/chat/voice",
+                                               files=files, headers=headers)
+                            if vr.status_code == 200:
+                                # Get transcript and response from headers
+                                transcript = vr.headers.get("X-Transcript", "")
+                                response_text = vr.headers.get("X-Response", "")
+
+                                st.session_state.chat_history.append({"role": "user", "text": f"[Voice] {transcript}"})
+                                st.session_state.chat_history.append({"role": "assistant", "text": response_text})
+
+                                st.chat_message("user").write(f"[Voice] {transcript}")
+                                st.chat_message("assistant").write(response_text)
+
+                                # Play audio response
+                                st.audio(vr.content, format="audio/mp3")
+                            else:
+                                st.error("Voice processing failed.")
+            except ImportError:
+                st.warning("Voice recording not available. Install: pip install streamlit-audiorecorder")
+                st.info("You can still use the text input below.")
+        else:
+            # Text input mode
+            chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
+            if chat_msg:
+                st.chat_message("user").write(chat_msg)
+                st.session_state.chat_history.append({"role": "user", "text": chat_msg})
+                with st.chat_message("assistant"):
+                    with st.spinner(""):
+                        cr = requests.post(f"{api_url}/api/chat/message",
+                                           json={"message": chat_msg}, headers=headers)
+                        if cr.status_code == 200:
+                            reply = cr.json()["response"]
+                        else:
+                            reply = "Something went wrong. Please try again."
+                    st.write(reply)
+
+                    # Auto-play TTS if voice was used recently
+                    if st.session_state.get("auto_tts"):
+                        tts = requests.post(f"{api_url}/api/chat/speak",
+                                            json={"message": reply}, headers=headers)
+                        if tts.status_code == 200:
+                            st.audio(tts.content, format="audio/mp3")
+
+                st.session_state.chat_history.append({"role": "assistant", "text": reply})
