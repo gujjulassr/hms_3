@@ -12,6 +12,7 @@ from models.session import Session
 from models.appointment import Appointment
 from models.patient import Patient
 from services.slot_utils import count_slots, generate_slot_times
+from services.audit import log_action
 
 router = APIRouter(prefix="/api/doctor", tags=["doctor"])
 
@@ -30,6 +31,12 @@ class ActionRequest(BaseModel):
 
 
 # ─── Helper ──────────────────────────────────────────────────────────────────
+
+async def _get_user_id(db, user: dict):
+    result = await db.execute(select(User).where(User.email == user["email"]))
+    usr = result.scalars().first()
+    return usr.id if usr else None
+
 
 async def _get_doctor(db, user: dict):
     result = await db.execute(
@@ -309,7 +316,19 @@ async def get_queue_api(user: dict = Depends(get_current_user)):
         if not session:
             return {"session": None, "emergency": [], "in_progress": [], "waiting": [], "booked": [], "delay_minutes": 0}
 
-        # Emergency queue
+        # In-progress (with doctor) — both emergency and normal
+        prog_r = await db.execute(
+            select(Appointment, Patient, User)
+            .join(Patient, Appointment.patient_id == Patient.id)
+            .join(User, Patient.user_id == User.id)
+            .where(
+                Appointment.session_id == session.id,
+                Appointment.status == "in_progress"
+            ).order_by(Appointment.started_at)
+        )
+        in_progress = [_format_queue_item(r, session.delay_minutes) for r in prog_r.all()]
+
+        # Emergency queue (only checked_in emergencies waiting to be called)
         emerg_r = await db.execute(
             select(Appointment, Patient, User)
             .join(Patient, Appointment.patient_id == Patient.id)
@@ -317,23 +336,10 @@ async def get_queue_api(user: dict = Depends(get_current_user)):
             .where(
                 Appointment.session_id == session.id,
                 Appointment.is_emergency == True,
-                Appointment.status.in_(["checked_in", "in_progress"])
+                Appointment.status == "checked_in"
             ).order_by(Appointment.checked_in_at)
         )
         emergency = [_format_queue_item(r, session.delay_minutes) for r in emerg_r.all()]
-
-        # In-progress (with doctor)
-        prog_r = await db.execute(
-            select(Appointment, Patient, User)
-            .join(Patient, Appointment.patient_id == Patient.id)
-            .join(User, Patient.user_id == User.id)
-            .where(
-                Appointment.session_id == session.id,
-                Appointment.is_emergency == False,
-                Appointment.status == "in_progress"
-            ).order_by(Appointment.started_at)
-        )
-        in_progress = [_format_queue_item(r, session.delay_minutes) for r in prog_r.all()]
 
         # Waiting (checked in, not yet called)
         wait_r = await db.execute(
@@ -423,9 +429,68 @@ async def checkin_patient_api(request: ActionRequest, user: dict = Depends(get_c
 
         appt.status = "checked_in"
         appt.checked_in_at = datetime.now()
+        actor_id = await _get_user_id(db, user)
+        await log_action(db, actor_id, "CHECKIN", "appointment", appt.id, {"uhid": request.patient_uhid})
         await db.commit()
 
     return {"message": f"Patient {request.patient_uhid} checked in at {appt.checked_in_at.strftime('%H:%M')}."}
+
+
+@router.post("/emergency-book")
+async def emergency_book_api(request: ActionRequest, user: dict = Depends(get_current_user)):
+    """Book an emergency appointment for a registered patient. Bypasses normal slots."""
+    async with async_session() as db:
+        doctor, doc_user = await _get_doctor(db, user)
+
+        # Find patient by UHID
+        pat_r = await db.execute(select(Patient).where(Patient.uhid == request.patient_uhid))
+        patient = pat_r.scalars().first()
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {request.patient_uhid} not found.")
+
+        # Find active session
+        sess_r = await db.execute(
+            select(Session).where(
+                Session.doctor_id == doctor.id,
+                Session.session_date == date.today(),
+                Session.status == "active"
+            )
+        )
+        session = sess_r.scalars().first()
+        if not session:
+            raise HTTPException(status_code=400, detail="No active session. Activate a session first.")
+
+        # Check if patient already has an appointment in this session
+        existing = await db.execute(
+            select(Appointment).where(
+                Appointment.session_id == session.id,
+                Appointment.patient_id == patient.id,
+                Appointment.status.in_(["booked", "checked_in", "in_progress"])
+            )
+        )
+        if existing.scalars().first():
+            raise HTTPException(status_code=400, detail=f"Patient {request.patient_uhid} already has an appointment in this session.")
+
+        new_appt = Appointment(
+            id=uuid_lib.uuid4(),
+            session_id=session.id,
+            patient_id=patient.id,
+            booked_by=patient.user_id,
+            slot_number=0,
+            slot_position=1,
+            slot_time=session.start_time,
+            status="checked_in",
+            priority="CRITICAL",
+            is_emergency=True,
+            checked_in_at=datetime.now()
+        )
+        db.add(new_appt)
+        await log_action(db, doc_user.id, "EMERGENCY", "appointment", new_appt.id, {"uhid": request.patient_uhid, "doctor": doc_user.full_name})
+        await db.commit()
+
+    pat_user_r = await db.execute(select(User).where(User.id == patient.user_id))
+    pat_user = pat_user_r.scalars().first()
+    return {"message": f"Emergency: {pat_user.full_name if pat_user else request.patient_uhid} ({request.patient_uhid}) added to emergency queue."}
 
 
 @router.post("/cancel-appointment")
@@ -444,6 +509,8 @@ async def cancel_appointment_api(request: ActionRequest, user: dict = Depends(ge
         appt, patient = row
         appt.status = "cancelled"
         patient.risk_score = (patient.risk_score or 0) + 10
+        actor_id = await _get_user_id(db, user)
+        await log_action(db, actor_id, "CANCEL", "appointment", appt.id, {"uhid": request.patient_uhid})
         await db.commit()
 
     return {"message": f"Appointment for {request.patient_uhid} cancelled."}
@@ -466,6 +533,8 @@ async def call_patient_api(request: ActionRequest, user: dict = Depends(get_curr
         appt.status = "in_progress"
         appt.called_at = datetime.now()
         appt.started_at = datetime.now()
+        actor_id = await _get_user_id(db, user)
+        await log_action(db, actor_id, "CALL", "appointment", appt.id, {"uhid": request.patient_uhid})
         await db.commit()
 
     return {"message": f"Patient {request.patient_uhid} called in."}
@@ -489,6 +558,8 @@ async def complete_appointment_api(request: ActionRequest, user: dict = Depends(
         appt.completed_at = datetime.now()
         if request.notes:
             appt.notes = request.notes
+        actor_id = await _get_user_id(db, user)
+        await log_action(db, actor_id, "COMPLETE", "appointment", appt.id, {"uhid": request.patient_uhid})
 
         # Dynamic delay calculation
         session_r = await db.execute(select(Session).where(Session.id == appt.session_id))
@@ -521,4 +592,41 @@ async def complete_appointment_api(request: ActionRequest, user: dict = Depends(
     if pat_user and doc_user:
         await notify_feedback(pat_user.email, pat_user.full_name, doc_user.full_name)
 
-    return {"message": f"Appointment completed. Delay: {session.delay_minutes}min.", "delay_minutes": session.delay_minutes}
+        # Auto-generate report, upload to Drive, email to patient
+        try:
+            from services.report_generator import generate_report_content, generate_pdf, upload_to_drive, send_report_email
+            from models.report import ConsultationReport
+            import uuid as _uuid
+
+            age = str(datetime.now().year - patient.date_of_birth.year) if patient.date_of_birth else ""
+            async with async_session() as db2:
+                doc_r2 = await db2.execute(select(Doctor).where(Doctor.user_id == doc_user.id))
+                doc2 = doc_r2.scalars().first()
+                spec = doc2.specialization if doc2 else ""
+
+                report_content = generate_report_content(
+                    patient_name=pat_user.full_name, patient_uhid=request.patient_uhid,
+                    patient_gender=patient.gender or "", patient_blood_group=patient.blood_group or "",
+                    patient_age=age, doctor_name=doc_user.full_name, specialization=spec,
+                    appointment_date=str(session.session_date), appointment_time=str(appt.slot_time),
+                    doctor_notes=request.notes or ""
+                )
+
+                pdf_path = generate_pdf(report_content, pat_user.full_name, request.patient_uhid,
+                                        doc_user.full_name, str(session.session_date))
+                drive_link = upload_to_drive(pdf_path, pat_user.email)
+
+                report = ConsultationReport(
+                    id=_uuid.uuid4(), appointment_id=appt.id,
+                    doctor_id=doc2.id if doc2 else None, patient_id=patient.id,
+                    content=report_content, doctor_notes=request.notes or "",
+                    drive_link=drive_link, pdf_path=pdf_path
+                )
+                db2.add(report)
+                await db2.commit()
+
+            await send_report_email(pat_user.email, pat_user.full_name, doc_user.full_name, pdf_path, drive_link)
+        except Exception as e:
+            print(f"[REPORT] Error: {e}")
+
+    return {"message": f"Appointment completed. Report generated and sent.", "delay_minutes": session.delay_minutes}

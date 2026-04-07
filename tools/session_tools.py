@@ -83,11 +83,11 @@ async def create_session(doctor_name: str, session_date: str, start_time: str, e
             select(Session).where(
                 Session.doctor_id == doctor.id,
                 Session.session_date == s_date,
-                Session.status != "cancelled"
+                Session.status.in_(["scheduled", "active"])
             )
         )
         if existing.scalars().first():
-            return f"Dr. {doc_user.full_name} already has a session on {s_date}."
+            return f"Dr. {doc_user.full_name} already has an active session on {s_date}."
 
         total_slots = count_slots(s_start, s_end, slot_duration)
 

@@ -15,4 +15,4 @@ class User(Base):
     full_name = Column(String, nullable=False)
     role = Column(String, nullable=False)  # patient, doctor, nurse, admin, staff
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)

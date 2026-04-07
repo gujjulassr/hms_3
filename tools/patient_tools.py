@@ -57,22 +57,48 @@ async def get_patient_details(query: str) -> str:
 
 
 @tool
-async def register_patient(full_name: str, email: str, phone: str, gender: str, blood_group: str) -> str:
-    """Register a new patient in the system. Returns their UHID."""
+async def register_patient(full_name: str, email: str, phone: str, gender: str, blood_group: str,
+                           date_of_birth: str = "", address: str = "",
+                           emergency_contact_name: str = "", emergency_contact_phone: str = "",
+                           password: str = "password123") -> str:
+    """Register a new patient in the system. Returns their UHID.
+    Required fields: full_name, email, phone, gender, blood_group.
+    Optional: date_of_birth (YYYY-MM-DD), address, emergency_contact_name, emergency_contact_phone, password.
+    IMPORTANT: Collect ALL required fields before calling this tool. Ask the user for any missing fields."""
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+    # Validate required fields
+    if not full_name or not email or not phone or not gender or not blood_group:
+        return "Missing required fields. Please provide: full_name, email, phone, gender, blood_group."
+
     async with async_session() as db:
+        # Check duplicate email
+        existing = await db.execute(select(User).where(User.email == email))
+        if existing.scalars().first():
+            return f"Email '{email}' is already registered."
+
+        # Generate UHID
         result = await db.execute(select(Patient).order_by(Patient.uhid.desc()))
         last_patient = result.scalars().first()
-
         if last_patient:
             last_number = int(last_patient.uhid.split("-")[-1])
             new_uhid = f"HMS-{datetime.now().year}-{str(last_number + 1).zfill(5)}"
         else:
             new_uhid = f"HMS-{datetime.now().year}-00001"
 
+        # Parse DOB
+        dob = None
+        if date_of_birth:
+            try:
+                dob = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+
         new_user = User(
             id=uuid.uuid4(),
             email=email, phone=phone,
-            password_hash="temp_hash",
+            password_hash=pwd_context.hash(password),
             full_name=full_name,
             role="patient", is_active=True
         )
@@ -84,13 +110,18 @@ async def register_patient(full_name: str, email: str, phone: str, gender: str, 
             user_id=new_user.id,
             uhid=new_uhid,
             gender=gender,
-            blood_group=blood_group
+            blood_group=blood_group,
+            date_of_birth=dob,
+            address=address,
+            emergency_contact_name=emergency_contact_name,
+            emergency_contact_phone=emergency_contact_phone
         )
         db.add(new_patient)
-        await log_action(db, new_user.id, "REGISTER", "patient", new_patient.id, {"uhid": new_uhid})
+        await log_action(db, new_user.id, "REGISTER", "patient", new_patient.id,
+                         {"uhid": new_uhid, "name": full_name, "email": email})
         await db.commit()
 
-    return f"Patient registered! UHID: {new_uhid}, Name: {full_name}"
+    return f"Patient registered! UHID: {new_uhid}, Name: {full_name}, Email: {email}. Default password: {password}"
 
 
 @tool

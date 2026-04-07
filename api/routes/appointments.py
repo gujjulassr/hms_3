@@ -96,11 +96,47 @@ async def update_my_profile(req: UpdateProfileRequest, user: dict = Depends(get_
         if req.emergency_contact_phone:
             patient.emergency_contact_phone = req.emergency_contact_phone
 
+        await log_action(db, usr.id, "UPDATE_PROFILE", "patient", patient.id, {"uhid": patient.uhid})
         await db.commit()
     return {"message": "Profile updated."}
 
 
 # ─── GET /my-appointments ─────────────────────────────────────────────────
+
+@router.get("/my-reports")
+async def my_reports(user: dict = Depends(get_current_user)):
+    """Get consultation reports for logged-in patient."""
+    from models.report import ConsultationReport
+    async with async_session() as db:
+        pat_r = await db.execute(
+            select(Patient).join(User, Patient.user_id == User.id)
+            .where(User.email == user["email"])
+        )
+        patient = pat_r.scalars().first()
+        if not patient:
+            return {"reports": []}
+
+        result = await db.execute(
+            select(ConsultationReport, Doctor, User)
+            .join(Doctor, ConsultationReport.doctor_id == Doctor.id)
+            .join(User, Doctor.user_id == User.id)
+            .where(ConsultationReport.patient_id == patient.id)
+            .order_by(ConsultationReport.created_at.desc())
+        )
+        rows = result.all()
+        reports = []
+        for report, doctor, doc_user in rows:
+            reports.append({
+                "id": str(report.id),
+                "doctor": doc_user.full_name,
+                "specialization": doctor.specialization or "",
+                "content": report.content,
+                "doctor_notes": report.doctor_notes or "",
+                "drive_link": report.drive_link or "",
+                "created_at": str(report.created_at) if report.created_at else "",
+            })
+    return {"reports": reports}
+
 
 @router.get("/my-appointments")
 async def my_appointments(user: dict = Depends(get_current_user)):
@@ -243,6 +279,138 @@ async def cancel_my_appointment(req: CancelRequest, user: dict = Depends(get_cur
     return {"message": f"Appointment with Dr. {doc_user.full_name} on {session.session_date} at {appt.slot_time} cancelled."}
 
 
+# ─── POST /reschedule-appointment ─────────────────────────────────────────
+
+class RescheduleRequest(BaseModel):
+    doctor_name: str
+    new_date: str = ""
+    new_time: str = ""
+
+
+@router.post("/reschedule-appointment")
+async def reschedule_appointment(req: RescheduleRequest, user: dict = Depends(get_current_user)):
+    """Reschedule a patient's appointment — cancels old (no risk penalty) and books new slot."""
+    from tools.appointment_tools import find_free_slot
+
+    async with async_session() as db:
+        # Find patient
+        pat_r = await db.execute(
+            select(Patient).join(User, Patient.user_id == User.id)
+            .where(User.email == user["email"])
+        )
+        patient = pat_r.scalars().first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found.")
+
+        # Find existing appointment
+        appt_r = await db.execute(
+            select(Appointment, Session, Doctor, User)
+            .join(Session, Appointment.session_id == Session.id)
+            .join(Doctor, Session.doctor_id == Doctor.id)
+            .join(User, Doctor.user_id == User.id)
+            .where(
+                Appointment.patient_id == patient.id,
+                User.full_name.ilike(f"%{req.doctor_name}%"),
+                Appointment.status.in_(["booked", "checked_in"]),
+                Session.session_date >= date.today()
+            )
+        )
+        old_row = appt_r.first()
+        if not old_row:
+            raise HTTPException(status_code=404, detail="No active appointment found to reschedule.")
+
+        old_appt, old_session, doctor, doc_user = old_row
+
+        # Find new session/slot
+        new_date = date.today()
+        if req.new_date:
+            try:
+                new_date = datetime.strptime(req.new_date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+        # Find session on new date
+        sess_r = await db.execute(
+            select(Session).where(
+                Session.doctor_id == doctor.id,
+                Session.session_date == new_date,
+                Session.status.in_(["scheduled", "active"])
+            )
+        )
+        new_session = sess_r.scalars().first()
+        if not new_session:
+            raise HTTPException(status_code=404, detail=f"No session for Dr. {doc_user.full_name} on {new_date}.")
+
+        # Check if specific requested slot is available
+        if req.new_time:
+            requested_time = datetime.strptime(req.new_time, "%H:%M").time()
+            all_slots = generate_slot_times(
+                new_session.start_time, new_session.end_time, new_session.slot_duration_minutes,
+                new_session.lunch_start, new_session.lunch_end, new_session.overtime_minutes
+            )
+            target_slot = next((s for s in all_slots if s["slot_time"] == requested_time), None)
+            if target_slot:
+                booked_count = await db.execute(
+                    select(func.count(Appointment.id)).where(
+                        Appointment.session_id == new_session.id,
+                        Appointment.slot_number == target_slot["slot_number"],
+                        Appointment.status.in_(["booked", "checked_in", "in_progress"])
+                    )
+                )
+                count = booked_count.scalar() or 0
+                if count >= new_session.max_per_slot:
+                    raise HTTPException(status_code=409, detail=f"Slot at {req.new_time} is full on {new_date}.")
+
+        # Find free slot
+        result = await find_free_slot(db, new_session, req.new_time)
+        if not result:
+            raise HTTPException(status_code=409, detail=f"No available slots on {new_date}.")
+
+        slot_number, position, slot_time = result
+
+        # Check not same slot as old
+        if new_session.id == old_session.id and slot_number == old_appt.slot_number:
+            raise HTTPException(status_code=400, detail="New slot is the same as current appointment.")
+
+        # Cancel old appointment (NO risk penalty — it's a reschedule)
+        old_appt.status = "rescheduled"
+        await log_action(db, patient.user_id, "RESCHEDULE", "appointment", old_appt.id,
+                         {"uhid": patient.uhid, "doctor": doc_user.full_name,
+                          "old_date": str(old_session.session_date), "old_time": str(old_appt.slot_time),
+                          "new_date": str(new_date), "new_time": str(slot_time)})
+
+        # Book new appointment
+        new_appt = Appointment(
+            id=uuid_lib.uuid4(),
+            session_id=new_session.id,
+            patient_id=patient.id,
+            booked_by=patient.user_id,
+            slot_number=slot_number,
+            slot_position=position,
+            slot_time=slot_time,
+            status="booked"
+        )
+        db.add(new_appt)
+
+        # Get patient user for email
+        pat_user_r = await db.execute(select(User).where(User.id == patient.user_id))
+        pat_user = pat_user_r.scalars().first()
+        await db.commit()
+
+    # Send reschedule email with calendar invite
+    if pat_user:
+        from services.notifications.service import notify_reschedule
+        await notify_reschedule(pat_user.email, pat_user.full_name, doc_user.full_name,
+                                str(old_session.session_date), str(old_appt.slot_time),
+                                str(new_date), str(slot_time), patient.uhid)
+
+    return {
+        "message": f"Rescheduled: {old_session.session_date} {old_appt.slot_time} → {new_date} {slot_time} with Dr. {doc_user.full_name}",
+        "old": {"date": str(old_session.session_date), "time": str(old_appt.slot_time)},
+        "new": {"date": str(new_date), "time": str(slot_time)},
+    }
+
+
 # ─── Beneficiaries CRUD ──────────────────────────────────────────────────
 
 @router.get("/my-beneficiaries")
@@ -354,6 +522,7 @@ async def add_beneficiary(req: BeneficiaryRequest, user: dict = Depends(get_curr
             date_of_birth=dob
         )
         db.add(ben)
+        await log_action(db, patient.user_id, "ADD_BENEFICIARY", "beneficiary", ben.id, {"name": req.name, "uhid": uhid})
         await db.commit()
 
     return {"message": f"Beneficiary '{req.name}' added and registered as patient (UHID: {uhid}).", "uhid": uhid}
@@ -372,6 +541,8 @@ class BeneficiaryUpdateRequest(BaseModel):
 async def update_beneficiary(ben_id: str, req: BeneficiaryUpdateRequest, user: dict = Depends(get_current_user)):
     """Update a beneficiary."""
     async with async_session() as db:
+        usr_r = await db.execute(select(User).where(User.email == user["email"]))
+        usr = usr_r.scalars().first()
         ben_r = await db.execute(select(Beneficiary).where(Beneficiary.id == ben_id))
         ben = ben_r.scalars().first()
         if not ben:
@@ -391,6 +562,7 @@ async def update_beneficiary(ben_id: str, req: BeneficiaryUpdateRequest, user: d
                 ben.date_of_birth = datetime.strptime(req.date_of_birth, "%Y-%m-%d").date()
             except ValueError:
                 pass
+        await log_action(db, usr.id, "UPDATE_BENEFICIARY", "beneficiary", ben.id, {"name": ben.name})
         await db.commit()
     return {"message": "Beneficiary updated."}
 
@@ -399,10 +571,13 @@ async def update_beneficiary(ben_id: str, req: BeneficiaryUpdateRequest, user: d
 async def delete_beneficiary(ben_id: str, user: dict = Depends(get_current_user)):
     """Delete a beneficiary."""
     async with async_session() as db:
+        usr_r = await db.execute(select(User).where(User.email == user["email"]))
+        usr = usr_r.scalars().first()
         ben_r = await db.execute(select(Beneficiary).where(Beneficiary.id == ben_id))
         ben = ben_r.scalars().first()
         if not ben:
             raise HTTPException(status_code=404, detail="Beneficiary not found.")
+        await log_action(db, usr.id, "DELETE_BENEFICIARY", "beneficiary", ben.id, {"name": ben.name})
         await db.delete(ben)
         await db.commit()
     return {"message": "Beneficiary removed."}

@@ -49,23 +49,24 @@ def render_queue(api_url, headers):
     col3.metric("Emergency", len(data["emergency"]))
     col4.metric("Waiting", len(data["waiting"]))
 
-    # In-progress (with doctor)
+    # With Doctor (in_progress) — show emergency tag if applicable
     if data["in_progress"]:
-        st.markdown("### With Doctor")
+        st.markdown("---")
+        st.markdown("### :green[With Doctor]")
         for p in data["in_progress"]:
-            col_a, col_b, col_c = st.columns([3, 1, 1])
-            # Calculate consultation duration
+            col_a, col_b = st.columns([4, 1])
             duration = ""
             if p.get("started_at"):
                 try:
                     started = datetime.fromisoformat(p["started_at"])
                     mins = int((datetime.now() - started).total_seconds() / 60)
-                    duration = f" | In consultation: {mins} min"
+                    duration = f" | {mins} min"
                 except Exception:
                     pass
-            col_a.write(f"**{p['uhid']}** — {p['name']} (Slot {p['slot_number']}, {p['slot_time']}{duration})")
-            with col_c:
-                if st.button("Complete", key=f"comp_{p['uhid']}"):
+            emergency_tag = " :red[EMERGENCY]" if p.get("is_emergency") else ""
+            col_a.write(f"**{p['uhid']}** — {p['name']}{emergency_tag}{duration}")
+            with col_b:
+                if st.button("Complete", key=f"comp_{p['uhid']}", use_container_width=True):
                     r = requests.post(f"{api_url}/api/doctor/complete-appointment",
                                      json={"patient_uhid": p["uhid"]}, headers=headers)
                     if r.status_code == 200:
@@ -74,15 +75,24 @@ def render_queue(api_url, headers):
                         st.error(r.json().get("detail", "Failed"))
                     st.rerun()
 
-    # Emergency queue
+    # Emergency queue (checked_in emergencies waiting to be called)
     if data["emergency"]:
-        st.markdown("### Emergency Queue")
+        st.markdown("---")
+        st.markdown("### :red[Emergency Queue]")
         for p in data["emergency"]:
-            col_a, col_b = st.columns([3, 1])
-            col_a.write(f"**{p['uhid']}** — {p['name']} [{p['status'].upper()}] Priority: {p['priority']}")
+            col_a, col_b = st.columns([4, 1])
+            wait_info = ""
+            if p.get("checked_in_at"):
+                try:
+                    checked = datetime.fromisoformat(p["checked_in_at"])
+                    wait_mins = int((datetime.now() - checked).total_seconds() / 60)
+                    wait_info = f" | Waiting: {wait_mins} min"
+                except Exception:
+                    pass
+            col_a.write(f"**{p['uhid']}** — {p['name']} | Priority: {p['priority']}{wait_info}")
             with col_b:
                 if p["status"] == "checked_in":
-                    if st.button("Call", key=f"call_e_{p['uhid']}"):
+                    if st.button("Call", key=f"call_e_{p['uhid']}", use_container_width=True):
                         r = requests.post(f"{api_url}/api/doctor/call-patient",
                                          json={"patient_uhid": p["uhid"]}, headers=headers)
                         if r.status_code == 200:
@@ -91,7 +101,8 @@ def render_queue(api_url, headers):
 
     # Waiting queue (checked in)
     if data["waiting"]:
-        st.markdown("### Waiting")
+        st.markdown("---")
+        st.markdown("### :orange[Waiting]")
         for p in data["waiting"]:
             col_a, col_b = st.columns([3, 1])
             # Calculate wait time since check-in
@@ -114,7 +125,8 @@ def render_queue(api_url, headers):
 
     # Booked (not yet checked in)
     if data["booked"]:
-        st.markdown("### Booked (Not Checked In)")
+        st.markdown("---")
+        st.markdown("### :blue[Booked (Not Checked In)]")
         for p in data["booked"]:
             col_a, col_b, col_c = st.columns([3, 1, 1])
             col_a.write(f"**{p['uhid']}** — {p['name']} (Slot {p['slot_number']}, {p['slot_time']})")
@@ -145,6 +157,27 @@ def render_queue(api_url, headers):
 
     if not data["emergency"] and not data["waiting"] and not data["in_progress"] and not data["booked"]:
         st.info("No patients in queue.")
+
+    # Emergency booking section
+    st.divider()
+    st.subheader("Emergency Booking")
+    st.caption("Add a registered patient to emergency queue (bypasses normal slots)")
+    with st.form("emergency_book_form"):
+        e_uhid = st.text_input("Patient UHID (e.g. HMS-2026-00001)")
+        if st.form_submit_button("Add to Emergency Queue", use_container_width=True):
+            if e_uhid:
+                r = requests.post(f"{api_url}/api/doctor/emergency-book",
+                                 json={"patient_uhid": e_uhid.strip()}, headers=headers)
+                if r.status_code == 200:
+                    st.success(r.json()["message"])
+                    st.rerun()
+                else:
+                    try:
+                        st.error(r.json().get("detail", "Failed"))
+                    except Exception:
+                        st.error("Emergency booking failed")
+            else:
+                st.warning("Enter patient UHID")
 
 
 def render_sessions(api_url, headers):
@@ -199,18 +232,29 @@ def render_sessions(api_url, headers):
                     st.info("COMPLETED")
 
             # Actions
-            if status == "scheduled" and is_today:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if st.button("Activate", key=f"act_{sess['id']}", use_container_width=True):
-                        r = requests.post(f"{api_url}/api/doctor/activate-session", headers=headers)
-                        if r.status_code == 200:
-                            st.session_state.session_msg = ("success", r.json()["message"])
-                        else:
-                            st.session_state.session_msg = ("error", r.json().get("detail", "Failed"))
-                        st.rerun()
-                with col_b:
-                    if st.button("Cancel", key=f"can_{sess['id']}", use_container_width=True):
+            if status == "scheduled":
+                if is_today:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button("Activate", key=f"act_{sess['id']}", use_container_width=True):
+                            r = requests.post(f"{api_url}/api/doctor/activate-session", headers=headers)
+                            if r.status_code == 200:
+                                st.session_state.session_msg = ("success", r.json()["message"])
+                            else:
+                                st.session_state.session_msg = ("error", r.json().get("detail", "Failed"))
+                            st.rerun()
+                    with col_b:
+                        if st.button("Cancel", key=f"can_{sess['id']}", use_container_width=True):
+                            r = requests.post(f"{api_url}/api/doctor/cancel-session",
+                                             json={"session_id": sess["id"]}, headers=headers)
+                            if r.status_code == 200:
+                                st.session_state.session_msg = ("success", r.json()["message"])
+                            else:
+                                st.session_state.session_msg = ("error", r.json().get("detail", "Failed"))
+                            st.rerun()
+                else:
+                    # Future session — only cancel, no activate
+                    if st.button("Cancel Session", key=f"can_future_{sess['id']}", use_container_width=True):
                         r = requests.post(f"{api_url}/api/doctor/cancel-session",
                                          json={"session_id": sess["id"]}, headers=headers)
                         if r.status_code == 200:
@@ -391,31 +435,25 @@ def render_chat(api_url, headers):
         else:
             st.session_state.doc_chat_history = []
 
-    # Show all messages
+    # Show all previous messages
     for msg in st.session_state.doc_chat_history:
         if msg["role"] == "user":
             st.chat_message("user").write(msg["text"])
         else:
             st.chat_message("assistant").write(msg["text"])
 
-    # Handle pending message — show user message + spinner, then response
-    if "doc_pending_msg" in st.session_state:
-        msg = st.session_state.pop("doc_pending_msg")
-        st.chat_message("user").write(msg)
-        st.session_state.doc_chat_history.append({"role": "user", "text": msg})
+    # Chat input — shows message immediately, then spinner for response
+    chat_msg = st.chat_input("Type your message...", key="doc_chat_input")
+    if chat_msg:
+        st.chat_message("user").write(chat_msg)
+        st.session_state.doc_chat_history.append({"role": "user", "text": chat_msg})
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            with st.spinner(""):
                 cr = requests.post(f"{api_url}/api/chat/message",
-                                   json={"message": msg}, headers=headers)
+                                   json={"message": chat_msg}, headers=headers)
                 if cr.status_code == 200:
                     reply = cr.json()["response"]
                 else:
                     reply = "Something went wrong. Please try again."
             st.write(reply)
         st.session_state.doc_chat_history.append({"role": "assistant", "text": reply})
-
-    # Chat input
-    chat_msg = st.chat_input("Type your message...", key="doc_chat_input")
-    if chat_msg:
-        st.session_state["doc_pending_msg"] = chat_msg
-        st.rerun()

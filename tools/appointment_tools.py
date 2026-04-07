@@ -288,3 +288,143 @@ async def cancel_appointment(patient_uhid: str, doctor_name: str) -> str:
                                  str(session.session_date), str(appt.slot_time))
 
     return f"Appointment cancelled for {patient_uhid} with Dr. {doc_user.full_name} on {session.session_date} at {appt.slot_time}. Risk score +10."
+
+
+@tool
+async def reschedule_appointment(patient_uhid: str, doctor_name: str, new_date: str = "", new_time: str = "", confirm: bool = False) -> str:
+    """Reschedule a patient's appointment to a new date/time. No risk penalty.
+    Provide patient UHID, doctor name, new_date (YYYY-MM-DD), new_time (HH:MM optional).
+    Set confirm=True only after patient confirms."""
+    async with async_session() as db:
+        # Find existing appointment
+        result = await db.execute(
+            select(Appointment, Patient, Session, Doctor, User)
+            .join(Patient, Appointment.patient_id == Patient.id)
+            .join(Session, Appointment.session_id == Session.id)
+            .join(Doctor, Session.doctor_id == Doctor.id)
+            .join(User, Doctor.user_id == User.id)
+            .where(
+                Patient.uhid == patient_uhid,
+                User.full_name.ilike(f"%{doctor_name}%"),
+                Appointment.status.in_(["booked", "checked_in"]),
+                Session.session_date >= date.today()
+            ).order_by(Session.session_date, Appointment.slot_time)
+        )
+        rows = result.all()
+        if not rows:
+            return f"No active appointment found for {patient_uhid} with {doctor_name}."
+
+        old_appt, patient, old_session, doctor, doc_user = None, None, None, None, None
+        for row in rows:
+            r_appt, r_patient, r_session, r_doctor, r_doc_user = row
+            if r_session.status in ["active", "scheduled"]:
+                old_appt, patient, old_session, doctor, doc_user = r_appt, r_patient, r_session, r_doctor, r_doc_user
+                break
+
+        if not old_appt:
+            return "No reschedulable appointment found."
+
+        # Parse new date
+        target_date = date.today()
+        if new_date:
+            try:
+                target_date = datetime.strptime(new_date, "%Y-%m-%d").date()
+            except ValueError:
+                return "Invalid date format. Use YYYY-MM-DD."
+
+        # Find session on new date
+        sess_r = await db.execute(
+            select(Session).where(
+                Session.doctor_id == doctor.id,
+                Session.session_date == target_date,
+                Session.status.in_(["scheduled", "active"])
+            )
+        )
+        new_session = sess_r.scalars().first()
+        if not new_session:
+            return f"No session for Dr. {doc_user.full_name} on {target_date}."
+
+        # Check if specific requested slot is available
+        if new_time:
+            from sqlalchemy import func as sqlfunc
+            # Check if requested time slot is full
+            requested_time = datetime.strptime(new_time, "%H:%M").time()
+            all_slots = generate_slot_times(
+                new_session.start_time, new_session.end_time, new_session.slot_duration_minutes,
+                new_session.lunch_start, new_session.lunch_end, new_session.overtime_minutes
+            )
+            target_slot = None
+            for s in all_slots:
+                if s["slot_time"] == requested_time:
+                    target_slot = s
+                    break
+            if not target_slot:
+                # Time doesn't match any slot, find nearest
+                target_slot = next((s for s in all_slots if s["slot_time"] >= requested_time), None)
+
+            if target_slot:
+                booked_count = await db.execute(
+                    select(sqlfunc.count(Appointment.id)).where(
+                        Appointment.session_id == new_session.id,
+                        Appointment.slot_number == target_slot["slot_number"],
+                        Appointment.status.in_(["booked", "checked_in", "in_progress"])
+                    )
+                )
+                count = booked_count.scalar() or 0
+                if count >= new_session.max_per_slot:
+                    # Requested slot is full — find next available
+                    next_slot = await find_free_slot(db, new_session, new_time)
+                    if next_slot:
+                        _, _, next_time = next_slot
+                        return (f"Slot at {new_time} is full on {target_date}. "
+                                f"Next available: {next_time}. Would you like to reschedule to {next_time} instead?")
+                    else:
+                        return f"Slot at {new_time} is full and no other slots available on {target_date}."
+
+        # Find free slot
+        new_slot = await find_free_slot(db, new_session, new_time)
+        if not new_slot:
+            return f"No available slots for Dr. {doc_user.full_name} on {target_date}."
+
+        slot_number, position, slot_time = new_slot
+
+        if not confirm:
+            return (f"Reschedule available: Current: {old_session.session_date} at {old_appt.slot_time} → "
+                    f"New: {target_date} at {slot_time} with Dr. {doc_user.full_name}. "
+                    f"No risk penalty. Say 'yes' to confirm.")
+
+        # Cancel old (no risk penalty)
+        old_appt.status = "rescheduled"
+        await log_action(db, patient.user_id, "RESCHEDULE", "appointment", old_appt.id,
+                         {"uhid": patient_uhid, "doctor": doc_user.full_name,
+                          "old_date": str(old_session.session_date), "old_time": str(old_appt.slot_time),
+                          "new_date": str(target_date), "new_time": str(slot_time)})
+
+        # Book new
+        import uuid as _uuid
+        new_appt = Appointment(
+            id=_uuid.uuid4(),
+            session_id=new_session.id,
+            patient_id=patient.id,
+            booked_by=patient.user_id,
+            slot_number=slot_number,
+            slot_position=position,
+            slot_time=slot_time,
+            status="booked"
+        )
+        db.add(new_appt)
+
+        # Get patient user for email
+        pat_user_r = await db.execute(select(User).where(User.id == patient.user_id))
+        pat_user = pat_user_r.scalars().first()
+        await db.commit()
+
+    # Send reschedule email with calendar invite
+    if pat_user:
+        from services.notifications.service import notify_reschedule
+        await notify_reschedule(pat_user.email, pat_user.full_name, doc_user.full_name,
+                                str(old_session.session_date), str(old_appt.slot_time),
+                                str(target_date), str(slot_time), patient_uhid)
+
+    return (f"Rescheduled! {old_session.session_date} {old_appt.slot_time} → {target_date} {slot_time} "
+            f"with Dr. {doc_user.full_name}. No risk penalty.")

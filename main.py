@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from config.database import engine
 from models.base import Base
+from models import user, patient, doctor, session, appointment, audit_log, beneficiary, rating, report  # noqa: F401
 from services.scheduler import scheduler_loop
 
 
@@ -48,12 +49,14 @@ from api.routes.doctor_dashboard import router as doctor_router
 from api.routes.chat import router as chat_router
 from api.routes.appointments import router as appointments_router
 from api.routes.analytics import router as analytics_router
+from api.routes.admin import router as admin_router
 
 app.include_router(auth_router)
 app.include_router(doctor_router)
 app.include_router(chat_router)
 app.include_router(appointments_router)
 app.include_router(analytics_router)
+app.include_router(admin_router)
 
 
 @app.get("/")

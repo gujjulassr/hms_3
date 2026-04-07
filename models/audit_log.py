@@ -14,4 +14,4 @@ class AuditLog(Base):
     target_type = Column(String, nullable=True)
     target_id = Column(UUID(as_uuid=True), nullable=True)
     details = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)

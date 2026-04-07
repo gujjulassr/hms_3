@@ -14,4 +14,4 @@ class Rating(Base):
     appointment_id = Column(UUID(as_uuid=True), ForeignKey("appointments.id"), nullable=True)
     rating = Column(Integer, nullable=False)  # 1-5
     feedback = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)

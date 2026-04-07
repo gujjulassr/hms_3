@@ -5,8 +5,8 @@ from datetime import date
 
 def render(api_url, headers):
     # Tabs for navigation
-    tab_details, tab_appts, tab_book, tab_beneficiaries, tab_chat = st.tabs(
-        ["My Details", "My Appointments", "Book Appointment", "Beneficiaries", "Chat"]
+    tab_details, tab_appts, tab_book, tab_reports, tab_beneficiaries, tab_chat = st.tabs(
+        ["My Details", "My Appointments", "Book Appointment", "Reports", "Beneficiaries", "Chat"]
     )
 
     # Fetch profile once (fast, no LLM)
@@ -126,15 +126,23 @@ def render(api_url, headers):
                 if active:
                     st.subheader("Active Appointments")
                     for a in active:
-                        col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                        col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
                         who = "You" if a.get("is_self", True) else a.get("patient_name", "")
                         col1.write(f"**{a['doctor']}** ({a['specialization']}) — for **{who}**")
                         col2.write(f"{a['date']} at {a['time']}")
                         status_color = {"booked": "blue", "checked_in": "orange", "in_progress": "green"}
                         col3.write(f":{status_color.get(a['status'], 'gray')}[{a['status'].upper()}]")
-                        with col4:
-                            if a["status"] == "booked":
-                                if st.button("Cancel", key=f"cancel_{a.get('patient_uhid', '')}_{a['doctor']}_{a['date']}"):
+                        if a["status"] == "booked":
+                            with col4:
+                                if st.button("Reschedule", key=f"resched_{a.get('patient_uhid', '')}_{a['doctor']}_{a['date']}", use_container_width=True):
+                                    st.session_state["reschedule_appt"] = {
+                                        "doctor": a["doctor"],
+                                        "old_date": a["date"],
+                                        "old_time": a["time"],
+                                    }
+                                    st.rerun()
+                            with col5:
+                                if st.button("Cancel", key=f"cancel_{a.get('patient_uhid', '')}_{a['doctor']}_{a['date']}", use_container_width=True):
                                     cr = requests.post(f"{api_url}/api/cancel-my-appointment",
                                                        json={"doctor_name": a["doctor"]}, headers=headers)
                                     if cr.status_code == 200:
@@ -142,6 +150,38 @@ def render(api_url, headers):
                                         st.rerun()
                                     else:
                                         st.error(cr.json().get("detail", "Failed"))
+
+                    # Reschedule form
+                    if "reschedule_appt" in st.session_state:
+                        rs = st.session_state["reschedule_appt"]
+                        st.divider()
+                        st.subheader(f"Reschedule: {rs['doctor']} ({rs['old_date']} at {rs['old_time']})")
+                        with st.form("reschedule_form"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                new_date = st.date_input("New Date", value=date.today(), min_value=date.today(), key="resched_date")
+                            with col2:
+                                new_time = st.text_input("Preferred Time (HH:MM, leave empty for earliest)", key="resched_time")
+                            col_s, col_c = st.columns(2)
+                            with col_s:
+                                if st.form_submit_button("Confirm Reschedule", use_container_width=True):
+                                    rr = requests.post(f"{api_url}/api/reschedule-appointment",
+                                                       json={"doctor_name": rs["doctor"],
+                                                             "new_date": str(new_date),
+                                                             "new_time": new_time},
+                                                       headers=headers)
+                                    if rr.status_code == 200:
+                                        st.success(rr.json()["message"])
+                                        del st.session_state["reschedule_appt"]
+                                        st.rerun()
+                                    else:
+                                        try:
+                                            st.error(rr.json().get("detail", "Reschedule failed"))
+                                        except Exception:
+                                            st.error("Reschedule failed")
+                        if st.button("Cancel Reschedule"):
+                            del st.session_state["reschedule_appt"]
+                            st.rerun()
 
                 if past:
                     st.divider()
@@ -215,7 +255,18 @@ def render(api_url, headers):
                 col_b.metric("Total Slots", total_slots_count)
                 col_c.metric("Delay", f"{delay} min" if delay > 0 else "None")
 
-                if not slots:
+                # Check if patient already has a booking in this session
+                appt_r = requests.get(f"{api_url}/api/my-appointments", headers=headers)
+                already_booked = False
+                if appt_r.status_code == 200:
+                    for a in appt_r.json().get("appointments", []):
+                        if a.get("doctor") == d["name"] and a.get("date") == str(book_date) and a.get("status") in ("booked", "checked_in", "in_progress") and a.get("is_self", True):
+                            already_booked = True
+                            break
+
+                if already_booked:
+                    st.warning(f"You already have an appointment with {d['name']} on {book_date}. Cancel or reschedule from My Appointments tab.")
+                elif not slots:
                     st.warning("All slots are fully booked for this date.")
                 else:
                     # Check for pending confirmation
@@ -281,6 +332,27 @@ def render(api_url, headers):
                                                 "date": str(book_date)
                                             }
                                             st.rerun()
+
+    # ── TAB: Reports ────────────────────────────────────────────────────
+    with tab_reports:
+        if st.button("Refresh", key="refresh_reports"):
+            st.rerun()
+
+        st.subheader("My Consultation Reports")
+        r = requests.get(f"{api_url}/api/my-reports", headers=headers)
+        if r.status_code == 200:
+            reports = r.json()["reports"]
+            if reports:
+                for rpt in reports:
+                    with st.expander(f"{rpt['doctor']} ({rpt['specialization']}) — {rpt['created_at'][:10]}"):
+                        st.markdown(rpt["content"])
+                        if rpt.get("doctor_notes"):
+                            st.divider()
+                            st.write(f"**Doctor's Notes:** {rpt['doctor_notes']}")
+                        if rpt.get("drive_link"):
+                            st.link_button("View on Google Drive", rpt["drive_link"], use_container_width=True)
+            else:
+                st.info("No reports yet. Reports are generated after your consultation is completed.")
 
     # ── TAB 3: Beneficiaries ────────────────────────────────────────────
     with tab_beneficiaries:
@@ -390,31 +462,25 @@ def render(api_url, headers):
             else:
                 st.session_state.chat_history = []
 
-        # Show all messages
+        # Show all previous messages
         for msg in st.session_state.chat_history:
             if msg["role"] == "user":
                 st.chat_message("user").write(msg["text"])
             else:
                 st.chat_message("assistant").write(msg["text"])
 
-        # Handle pending message — show user message + spinner, then response
-        if "pat_pending_msg" in st.session_state:
-            msg = st.session_state.pop("pat_pending_msg")
-            st.chat_message("user").write(msg)
-            st.session_state.chat_history.append({"role": "user", "text": msg})
+        # Chat input — shows message immediately, then spinner for response
+        chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
+        if chat_msg:
+            st.chat_message("user").write(chat_msg)
+            st.session_state.chat_history.append({"role": "user", "text": chat_msg})
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+                with st.spinner(""):
                     cr = requests.post(f"{api_url}/api/chat/message",
-                                       json={"message": msg}, headers=headers)
+                                       json={"message": chat_msg}, headers=headers)
                     if cr.status_code == 200:
                         reply = cr.json()["response"]
                     else:
                         reply = "Something went wrong. Please try again."
                 st.write(reply)
             st.session_state.chat_history.append({"role": "assistant", "text": reply})
-
-        # Chat input
-        chat_msg = st.chat_input("Type your message...", key="pat_chat_input")
-        if chat_msg:
-            st.session_state["pat_pending_msg"] = chat_msg
-            st.rerun()

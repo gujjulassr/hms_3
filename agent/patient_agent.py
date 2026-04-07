@@ -8,7 +8,7 @@ from config.settings import OPENAI_API_KEY
 from tools.patient_tools import update_patient, register_patient, add_beneficiary, get_my_beneficiaries
 from tools.doctor_tools import search_doctors
 from tools.session_tools import check_availability
-from tools.appointment_tools import book_appointment, get_my_appointments, cancel_appointment,check_earliest_slot
+from tools.appointment_tools import book_appointment, get_my_appointments, cancel_appointment, reschedule_appointment, check_earliest_slot
 from tools.rating_tools import submit_rating, get_doctor_ratings, search_feedback
 from tools.report_tools import generate_patient_report
 
@@ -18,15 +18,19 @@ class PatientState(TypedDict):
     user_info: str
 
 
-patient_tools = [register_patient, update_patient, add_beneficiary, get_my_beneficiaries, search_doctors, check_availability, book_appointment, get_my_appointments, cancel_appointment, submit_rating, get_doctor_ratings, search_feedback, generate_patient_report,check_earliest_slot]
+patient_tools = [register_patient, update_patient, add_beneficiary, get_my_beneficiaries, search_doctors, check_availability, book_appointment, get_my_appointments, cancel_appointment, reschedule_appointment, submit_rating, get_doctor_ratings, search_feedback, generate_patient_report, check_earliest_slot]
 
 llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
 llm_with_tools = llm.bind_tools(patient_tools)
 
 
 async def patient_chatbot(state: PatientState):
+    from datetime import date as _date, timedelta as _td
+    today = str(_date.today())
+    tomorrow = str(_date.today() + _td(days=1))
     user_info = state.get("user_info", "")
     system_msg = SystemMessage(content=f"""You are a Hospital Management System assistant for PATIENTS.
+        TODAY's date is {today}. TOMORROW is {tomorrow}. Always use these when user says 'today' or 'tomorrow'.
         You can help patients search doctors, check availability, book/cancel appointments, and view their details.
 
         CRITICAL RULES:
@@ -40,11 +44,17 @@ async def patient_chatbot(state: PatientState):
         When passing doctor names to tools, use only the last name without 'Dr.' prefix (e.g., 'Shah' not 'Dr. Shah').
         NEVER book an appointment without explicit confirmation from the patient. If they ask 'what is the earliest slot', only check availability and tell them. Only book when they say 'book', 'confirm', or 'yes'.
         When the user says 'cancel' — use cancel_appointment tool. It works for both 'booked' and 'checked_in' appointments. Do NOT confuse cancel with complete.
+        When the user says 'reschedule' — use reschedule_appointment tool. Provide patient UHID, doctor name, new_date (YYYY-MM-DD), and optionally new_time (HH:MM). No risk penalty for rescheduling. Always confirm before proceeding.
         Current logged-in user: {user_info}
         When the patient asks about 'my appointments' or 'my details', use their UHID from above. Do not ask for UHID.
-        When the patient says 'my relative', 'my family member', 'my beneficiary', or similar — first call get_my_beneficiaries to find their beneficiaries, then proceed with the action using the beneficiary's UHID. Do NOT ask for the name if they have only one beneficiary — use that one directly. If multiple, ask which one.
+        When the patient says 'my relative', 'my family member', 'my beneficiary', or similar — first call get_my_beneficiaries to find their beneficiaries, then proceed with the action using the beneficiary's UHID. Do NOT ask for the name if they have only one beneficiary — use that one directly. If multiple, ALWAYS list ALL of them and ask the user to pick one. NEVER auto-select.
         Always use 24-hour format for time (e.g., '22:00' not '10:00 PM').
-        When booking at 'earliest' or 'next available', pass preferred_time as empty string. Do NOT guess a time.""")
+        When booking at 'earliest' or 'next available', pass preferred_time as empty string. Do NOT guess a time.
+
+        REGISTRATION: When registering a new patient or beneficiary, collect ALL required fields before calling the tool:
+        - Full Name, Email, Phone, Gender (Male/Female/Other), Blood Group (A+/A-/B+/B-/O+/O-/AB+/AB-)
+        - Optional: Date of Birth (YYYY-MM-DD), Address, Emergency Contact Name & Phone
+        Ask for missing required fields. Do NOT call register_patient until you have all required fields.""")
     messages = [system_msg] + state["messages"]
     response = await llm_with_tools.ainvoke(messages)
     if response.tool_calls:
